@@ -2,7 +2,7 @@ name: PR Risk Scan — Gate
 
 on:
   pull_request:
-    branches: [staged]
+    branches: [main]
     types: [opened, synchronize, reopened]
     paths:
       - "skills/**"
@@ -26,7 +26,9 @@ jobs:
 
       - name: Collect changed files
         run: |
-          git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD" > changed-files.txt
+          git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD" \
+            | awk '!/^(README\.md|docs\/README\.[^/]+\.md)$/' \
+            > changed-files.txt
           echo "Changed files:"
           cat changed-files.txt || true
 

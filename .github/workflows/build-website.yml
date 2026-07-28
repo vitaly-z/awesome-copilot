@@ -2,15 +2,21 @@ name: Build Website
 
 on:
   pull_request:
-    branches: [staged]
+    branches: [main]
     paths:
-      - website
-      - agents
-      - skills
-      - plugins
-      - instructions
-      - hooks
-      - workflows
+      - "website/**"
+      - "agents/**"
+      - "skills/**"
+      - "plugins/**"
+      - "instructions/**"
+      - "hooks/**"
+      - "workflows/**"
+      - "extensions/**"
+      - "cookbook/**"
+      - "eng/**"
+      - ".all-contributorsrc"
+      - "package.json"
+      - "package-lock.json"
 
 permissions:
   contents: read

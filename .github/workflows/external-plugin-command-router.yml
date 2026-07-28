@@ -23,10 +23,10 @@ jobs:
       !github.event.issue.pull_request &&
       (startsWith(github.event.comment.body, '/approve') || startsWith(github.event.comment.body, '/reject'))
     steps:
-      - name: Checkout staged branch
+      - name: Checkout main branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: staged
+          ref: main
           fetch-depth: 0
 
       - name: Setup Node.js
@@ -207,7 +207,7 @@ jobs:
           pr_url=""
           pr_number=""
           if git diff --quiet; then
-            pr_number=$(gh pr list --head "$branch" --base staged --json number --jq '.[0].number')
+            pr_number=$(gh pr list --head "$branch" --base main --json number --jq '.[0].number')
             if [ -n "$pr_number" ]; then
               pr_url=$(gh pr view "$pr_number" --json url --jq '.url')
             fi
@@ -227,7 +227,7 @@ jobs:
           git commit -m "${title_action} external plugin ${plugin_name}"
           git push --force-with-lease origin "$branch"
 
-          pr_number=$(gh pr list --head "$branch" --base staged --json number --jq '.[0].number')
+          pr_number=$(gh pr list --head "$branch" --base main --json number --jq '.[0].number')
           pr_body=$(cat <<EOF
           ## Summary
 
@@ -249,7 +249,7 @@ jobs:
             pr_url=$(gh pr view "$pr_number" --json url --jq '.url')
           else
             pr_url=$(gh pr create \
-              --base staged \
+              --base main \
               --head "$branch" \
               --title "[external-plugin] ${title_action} ${plugin_name}" \
               --body "$pr_body")
@@ -342,8 +342,8 @@ jobs:
               `- **Catalog action:** ${action}`,
               `- **Source repository:** \`${process.env.SOURCE_REPO}\``,
               prUrl
-                ? `- **PR against \`staged\`:** ${prUrl}`
-                : '- **PR against `staged`:** No new PR was needed because the approved listing is already present.'
+              ? `- **PR against \`main\`:** ${prUrl}`
+              : '- **PR against `main`:** No new PR was needed because the approved listing is already present.'
             ].join('\n');
 
             await syncIssueLabels(issueNumber, new Set(['external-plugin', 'approved']));
@@ -487,10 +487,10 @@ jobs:
       !github.event.issue.pull_request &&
       startsWith(github.event.comment.body, '/mark-ready-for-review')
     steps:
-      - name: Checkout staged branch
+      - name: Checkout main branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: staged
+          ref: main
 
       - name: Apply explicit ready-for-review override
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
@@ -559,7 +559,11 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issueNumber: context.issue.number,
-              desiredLabels: new Set(['external-plugin', 'ready-for-review'])
+              desiredLabels: new Set([
+                'external-plugin',
+                'ready-for-review',
+                ...(labelNames.has('external-plugin-canvas') ? ['external-plugin-canvas'] : [])
+              ])
             });
 
             const marker = '<!-- external-plugin-mark-ready-override -->';
@@ -606,10 +610,10 @@ jobs:
       issue-state: ${{ steps.evaluate.outputs.issue-state }}
       issue-labels: ${{ steps.evaluate.outputs.issue-labels }}
     steps:
-      - name: Checkout staged branch
+      - name: Checkout main branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: staged
+          ref: main
 
       - name: Validate command and evaluate intake
         id: evaluate
@@ -716,10 +720,10 @@ jobs:
     needs: [rerun-intake-parse, rerun-intake-quality-gates]
     if: always() && needs.rerun-intake-parse.outputs.should-run == 'true'
     steps:
-      - name: Checkout staged branch
+      - name: Checkout main branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: staged
+          ref: main
 
       - name: Apply merged intake evaluation
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
@@ -746,8 +750,10 @@ jobs:
               if (process.env.QUALITY_JOB_RESULT === 'failure' || process.env.QUALITY_JOB_RESULT === 'cancelled') {
                 qualityResult = {
                   overall_status: 'infra_error',
-                  skill_validator_status: 'infra_error',
+                  vally_lint_status: 'infra_error',
                   smoke_status: 'infra_error',
+                  version_match_status: 'infra_error',
+                  canvas_structure_status: 'infra_error',
                   failure_class: 'infra',
                   summary: 'Quality-gate workflow failed unexpectedly. Re-run intake to retry.',
                 };
@@ -756,8 +762,10 @@ jobs:
               } else {
                 qualityResult = {
                   overall_status: 'infra_error',
-                  skill_validator_status: 'infra_error',
+                  vally_lint_status: 'infra_error',
                   smoke_status: 'infra_error',
+                  version_match_status: 'infra_error',
+                  canvas_structure_status: 'infra_error',
                   failure_class: 'infra',
                   summary: 'Quality-gate workflow did not return results. Re-run intake to retry.',
                 };

@@ -30,7 +30,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: staged
+          ref: main
 
       - name: Evaluate issue guard rails
         id: guard
@@ -86,7 +86,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: staged
+          ref: main
 
       - name: Merge evaluation and sync labels/comments
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
@@ -113,8 +113,10 @@ jobs:
               if (process.env.QUALITY_JOB_RESULT === 'failure' || process.env.QUALITY_JOB_RESULT === 'cancelled') {
                 qualityResult = {
                   overall_status: 'infra_error',
-                  skill_validator_status: 'infra_error',
+                  vally_lint_status: 'infra_error',
                   smoke_status: 'infra_error',
+                  version_match_status: 'infra_error',
+                  canvas_structure_status: 'infra_error',
                   failure_class: 'infra',
                   summary: 'Quality-gate workflow failed unexpectedly. Re-run intake to retry.',
                 };
@@ -123,8 +125,10 @@ jobs:
               } else {
                 qualityResult = {
                   overall_status: 'infra_error',
-                  skill_validator_status: 'infra_error',
+                  vally_lint_status: 'infra_error',
                   smoke_status: 'infra_error',
+                  version_match_status: 'infra_error',
+                  canvas_structure_status: 'infra_error',
                   failure_class: 'infra',
                   summary: 'Quality-gate workflow did not return results. Re-run intake to retry.',
                 };

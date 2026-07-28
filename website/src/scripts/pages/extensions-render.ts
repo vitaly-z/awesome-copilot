@@ -1,4 +1,18 @@
-import { escapeHtml, getGitHubUrl, getLastUpdatedHtml } from "../utils";
+import {
+  escapeHtml,
+  getGitHubHandle,
+  getGitHubUrl,
+  getLastUpdatedHtml,
+} from "../utils";
+import { sanitizeHttpUrl } from "../../lib/external-source";
+import { renderEmptyStateHtml, renderSharedCardHtml } from "./card-render";
+
+// Allow only http(s) URLs from external/generated data; unsafe values collapse
+// to "" so downstream truthiness guards (disabled buttons, omitted links) hold.
+function safeUrl(value?: string | null): string {
+  const sanitized = sanitizeHttpUrl(value);
+  return sanitized === "#" ? "" : sanitized;
+}
 
 export interface RenderableExtension {
   id: string;
@@ -17,19 +31,33 @@ export interface RenderableExtension {
       path?: string | null;
       type?: string | null;
     } | null;
-    gallery?: {
-      path?: string | null;
-      type?: string | null;
-    } | null;
+    gallery?:
+      | {
+          path?: string | null;
+          type?: string | null;
+        }
+      | Array<{
+          path?: string | null;
+          type?: string | null;
+        }>
+      | null;
   } | null;
   imageUrl?: string | null;
   assetPath?: string | null;
+  pluginName?: string | null;
+  installCommand?: string | null;
   installUrl?: string | null;
   sourceUrl?: string | null;
+  externalSource?: string | null;
   external?: boolean;
+  author?: { name: string; url?: string } | null;
 }
 
 export type ExtensionSortOption = "title" | "lastUpdated";
+
+export function getExtensionDetailUrl(id: string): string {
+  return `/extension/${id}/`;
+}
 
 export function sortExtensions<T extends RenderableExtension>(
   items: T[],
@@ -48,83 +76,124 @@ export function sortExtensions<T extends RenderableExtension>(
 
 export function renderExtensionsHtml(items: RenderableExtension[]): string {
   if (items.length === 0) {
-    return `
-      <div class="empty-state">
-        <h3>No extensions found</h3>
-        <p>No canvas extensions are available right now.</p>
-      </div>
-    `;
+    return renderEmptyStateHtml(
+      "No extensions found",
+      "No canvas extensions are available right now."
+    );
   }
 
   return items
     .map((item) => {
-      const installUrl =
+      const installUrl = safeUrl(
         item.installUrl ||
-        (item.path && item.ref
-          ? `https://github.com/github/awesome-copilot/tree/${item.ref}/${item.path.replace(
-             /\\/g,
-             "/"
-           )}`
-          : "");
-      const sourceUrl =
-        item.sourceUrl || (item.path ? getGitHubUrl(item.path) : "");
+          (item.path && item.ref
+            ? `https://github.com/github/awesome-copilot/tree/${item.ref}/${item.path.replace(
+                /\\/g,
+                "/"
+              )}`
+            : "")
+      );
+      const sourceUrl = safeUrl(
+        item.sourceUrl || (item.path ? getGitHubUrl(item.path) : "")
+      );
+      const externalSource = (item.externalSource || "").trim();
+      const pluginId = item.pluginName || item.id;
+      const ghappInstallUrl =
+        item.external
+          ? externalSource
+            ? `ghapp://plugins/marketplace/add?source=${encodeURIComponent(
+                externalSource
+              )}`
+            : ""
+          : pluginId
+            ? `ghapp://plugins/install?source=${encodeURIComponent(
+                `${pluginId}@awesome-copilot`
+              )}`
+            : "";
 
-      return `
-        <article id="${escapeHtml(item.id)}" class="resource-item" role="listitem">
-          <div class="resource-preview">
-           ${
-             item.imageUrl
-               ? `<button type="button" class="resource-thumbnail-btn" data-preview-url="${escapeHtml(item.imageUrl)}" data-preview-alt="${escapeHtml(item.name)} preview" aria-label="Open ${escapeHtml(item.name)} preview">
-                    <img class="resource-thumbnail" src="${escapeHtml(item.imageUrl)}" alt="${escapeHtml(item.name)} preview" loading="lazy" />
-                  </button>`
-               : `<div class="resource-thumbnail resource-thumbnail-placeholder" aria-hidden="true">Canvas</div>`
-           }
-           <div class="resource-info">
-             <div class="resource-title">${escapeHtml(item.name)}</div>
-             <div class="resource-description">${escapeHtml(
-               item.description || "Canvas extension"
-             )}</div>
-             <div class="resource-keywords">
-               ${
-                 item.keywords && item.keywords.length > 0
-                   ? item.keywords
-                       .map(
-                         (kw) =>
-                           `<span class="keyword-tag">${escapeHtml(kw)}</span>`
-                       )
-                       .join("")
-                   : ""
-               }
-             </div>
-             <div class="resource-meta">
-               ${
-                 item.external
-                   ? '<span class="resource-tag">External</span>'
-                   : ""
-               }
-               ${getLastUpdatedHtml(item.lastUpdated)}
-             </div>
-           </div>
-         </div>
-          <div class="resource-actions">
-            <button
-              class="btn btn-primary btn-small copy-install-url-btn"
-              data-install-url="${escapeHtml(installUrl)}"
-              title="Copy install URL"
-              ${installUrl ? "" : "disabled"}
-            >
-              Install
-            </button>
-            ${
-              sourceUrl
-                ? `<a href="${escapeHtml(
-                    sourceUrl
-                  )}" class="btn btn-secondary btn-small" target="_blank" rel="noopener noreferrer" title="View source">Source</a>`
-                : ""
-            }
-          </div>
-        </article>
+      const previewImageUrl = safeUrl(item.imageUrl);
+      const previewMediaHtml = previewImageUrl
+        ? `<div class="resource-thumbnail-btn" aria-hidden="true">
+            <img class="resource-thumbnail" src="${escapeHtml(previewImageUrl)}" alt="${escapeHtml(item.name)} preview" loading="lazy" />
+           </div>`
+        : `<div class="resource-thumbnail resource-thumbnail-placeholder" aria-hidden="true">Canvas</div>`;
+
+      const infoExtraHtml = `
+        <div class="resource-keywords">
+          ${
+           item.keywords && item.keywords.length > 0
+             ? item.keywords
+                 .map((kw) => `<span class="keyword-tag">${escapeHtml(kw)}</span>`)
+                 .join("")
+             : ""
+          }
+        </div>
       `;
+
+      const authorName = item.author?.name;
+      const authorUrl = item.author?.url;
+      const authorHandle =
+        authorName && authorUrl
+          ? getGitHubHandle(authorUrl, authorName)
+          : authorName || "";
+      const authorHtml = authorName
+        ? `<span class="resource-tag resource-author" title="${escapeHtml(
+            authorName
+          )}">by ${escapeHtml(authorHandle || authorName)}</span>`
+        : "";
+
+      const metaHtml = `
+        ${item.external ? '<span class="resource-tag">External</span>' : ""}
+        ${authorHtml}
+        ${getLastUpdatedHtml(item.lastUpdated)}
+      `;
+
+      const actionsHtml = `
+        ${
+          ghappInstallUrl
+            ? `<a
+          class="btn btn-primary btn-small"
+          href="${escapeHtml(ghappInstallUrl)}"
+          title="Install in the GitHub Copilot app"
+        >
+          Install in Copilot app
+        </a>`
+            : ""
+        }
+        ${
+          !item.external
+            ? `<button
+          class="btn btn-secondary btn-small copy-install-url-btn"
+          data-install-url="${escapeHtml(installUrl)}"
+          title="Copy fallback URL install target"
+          ${installUrl ? "" : "disabled"}
+        >
+          Copy URL
+        </button>`
+            : ""
+        }
+        ${
+          sourceUrl
+           ? `<a href="${escapeHtml(
+               sourceUrl
+             )}" class="btn btn-secondary btn-small" target="_blank" rel="noopener noreferrer" title="View source">Source</a>`
+           : ""
+        }
+      `;
+
+      return renderSharedCardHtml({
+        title: item.name,
+        description: item.description || "Canvas extension",
+        href: getExtensionDetailUrl(item.id),
+        previewMediaHtml,
+        infoExtraHtml,
+        metaHtml,
+        actionsHtml,
+        articleAttributes: {
+          id: item.id,
+          "data-extension-id": item.id,
+        },
+      });
     })
     .join("");
 }
