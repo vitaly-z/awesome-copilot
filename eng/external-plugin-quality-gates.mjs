@@ -6,8 +6,24 @@ import path from "path";
 import { Writable } from "stream";
 import { spawnSync } from "child_process";
 import { runLint, LintConsoleReporter } from "@microsoft/vally";
+import { evaluateRefShaConsistency, normalizeCommitSha } from "./lib/external-plugin-source-ref-sha.mjs";
+import { validateAgentPluginManifest } from "./agent-plugin-schema.mjs";
 
 const MAX_OUTPUT_LENGTH = 12000;
+const AGENT_PLUGIN_SCHEMA_URL = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+const AGENT_PLUGIN_ALLOWED_TOP_LEVEL_FIELDS = new Set([
+  "$schema",
+  "name",
+  "version",
+  "description",
+  "author",
+  "homepage",
+  "repository",
+  "license",
+  "keywords",
+  "extensions",
+]);
+const AGENT_PLUGIN_NAME_PATTERN = /^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
 const EXTERNAL_CANVAS_KEYWORD = "canvas";
 
 const INFRA_ERROR_PATTERNS = [
@@ -167,8 +183,129 @@ function findPluginJson(pluginRoot) {
     if (fs.existsSync(candidate)) {
       return candidate;
     }
+
   }
   return null;
+}
+
+function inspectAgentPluginSpecCompliance(pluginRoot) {
+      const pluginJsonPath = findPluginJson(pluginRoot);
+      if (!pluginJsonPath) {
+        return {
+          status: "warning",
+          output: "No plugin.json found in a recognized location. Agent Plugins v1.0.0 expects plugin.json at the plugin root.",
+        };
+      }
+
+      const rootPluginJsonPath = path.join(pluginRoot, "plugin.json");
+      const issues = [];
+      if (pluginJsonPath !== rootPluginJsonPath) {
+        issues.push(`manifest location is "${path.relative(pluginRoot, pluginJsonPath)}"; expected "plugin.json" at plugin root`);
+      }
+
+      let manifest;
+      try {
+        manifest = JSON.parse(fs.readFileSync(pluginJsonPath, "utf8"));
+      } catch (error) {
+        return {
+          status: "warning",
+          output: `plugin.json is not valid JSON: ${error.message}`,
+        };
+      }
+
+      if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+        issues.push("plugin.json top-level value must be a JSON object");
+      } else {
+        if (manifest.$schema !== AGENT_PLUGIN_SCHEMA_URL) {
+          issues.push(`$schema should be "${AGENT_PLUGIN_SCHEMA_URL}"`);
+        }
+
+        const pluginName = manifest.name;
+        if (typeof pluginName !== "string") {
+          issues.push('required field "name" must be a string');
+        } else {
+          if (pluginName.length < 1 || pluginName.length > 64) {
+            issues.push('field "name" must be 1-64 characters');
+          }
+          if (!AGENT_PLUGIN_NAME_PATTERN.test(pluginName)) {
+            issues.push('field "name" does not match Agent Plugins naming constraints');
+          }
+        }
+
+        const requiredStringFields = ["version", "description"];
+        for (const field of requiredStringFields) {
+          if (typeof manifest[field] !== "string" || manifest[field].trim() === "") {
+            issues.push(`required field "${field}" must be a non-empty string`);
+          }
+        }
+
+        const optionalStringFields = ["homepage", "repository", "license"];
+        for (const field of optionalStringFields) {
+          if (manifest[field] !== undefined && typeof manifest[field] !== "string") {
+            issues.push(`field "${field}" must be a string when provided`);
+          }
+        }
+
+        if (manifest.author !== undefined) {
+          if (!manifest.author || typeof manifest.author !== "object" || Array.isArray(manifest.author)) {
+            issues.push('field "author" must be an object when provided');
+          } else {
+            const allowedAuthorFields = new Set(["name", "email", "url"]);
+            for (const authorField of Object.keys(manifest.author)) {
+              if (!allowedAuthorFields.has(authorField)) {
+                issues.push(`field "author.${authorField}" is not allowed`);
+              } else if (typeof manifest.author[authorField] !== "string") {
+                issues.push(`field "author.${authorField}" must be a string`);
+              }
+            }
+          }
+        }
+
+        if (manifest.keywords !== undefined) {
+          if (!Array.isArray(manifest.keywords)) {
+            issues.push('field "keywords" must be an array of strings when provided');
+          } else if (manifest.keywords.some((entry) => typeof entry !== "string")) {
+            issues.push('field "keywords" must contain only strings');
+          }
+        }
+
+        if (manifest.extensions !== undefined) {
+          if (!manifest.extensions || typeof manifest.extensions !== "object" || Array.isArray(manifest.extensions)) {
+            issues.push('field "extensions" must be an object when provided');
+          } else {
+            for (const [namespace, value] of Object.entries(manifest.extensions)) {
+              if (!value || typeof value !== "object" || Array.isArray(value)) {
+                issues.push(`field "extensions.${namespace}" must be an object`);
+              }
+            }
+          }
+        }
+
+        for (const field of Object.keys(manifest)) {
+          if (!AGENT_PLUGIN_ALLOWED_TOP_LEVEL_FIELDS.has(field)) {
+            issues.push(`top-level field "${field}" is not part of Agent Plugins v1.0.0`);
+          }
+        }
+      }
+
+      if (manifest && typeof manifest === "object" && !Array.isArray(manifest)) {
+        issues.push(...validateAgentPluginManifest(manifest).map((error) => `schema validation: ${error}`));
+      }
+
+      if (issues.length === 0) {
+        return {
+          status: "pass",
+          output: `Agent Plugins v1.0.0 manifest checks passed for ${path.relative(pluginRoot, pluginJsonPath) || "plugin.json"}.`,
+        };
+      }
+
+      return {
+        status: "warning",
+        output: [
+          "Agent Plugins v1.0.0 manifest warnings:",
+          ...issues.map((issue) => `- ${issue}`),
+        ].join("\n"),
+      };
 }
 
 function buildVallyLintArgs(pluginRoot) {
@@ -384,6 +521,7 @@ function readPluginManifestAtLocator(repoDir, readRef, locator, normalizedPlugin
           message: `Invalid JSON in "${manifestPath}" at "${locator}": ${error.message}`,
         };
       }
+
     }
 
     if (isMissingPathAtLocator(showResult.output)) {
@@ -399,6 +537,87 @@ function readPluginManifestAtLocator(repoDir, readRef, locator, normalizedPlugin
   return {
     kind: "not_found",
     message: `No plugin.json found at "${locator}". Expected one of: ${manifestCandidates.join(", ")}`,
+  };
+}
+
+function resolveCommitShaAtReadRef(repoDir, readRef, locator) {
+  const revParse = runCommand("git", ["rev-parse", `${readRef}^{commit}`], { cwd: repoDir });
+  if (revParse.exitCode !== 0) {
+    return {
+      status: "fail",
+      commitSha: null,
+      output: `source.ref "${locator}" does not identify a commit (it may point to a tag object, tree, or blob); only commit-backed refs are supported`,
+    };
+  }
+
+  const commitSha = normalizeCommitSha(revParse.stdout);
+  if (!commitSha) {
+    return {
+      status: "infra_error",
+      commitSha: null,
+      output: `Unable to parse commit SHA for "${locator}" from "${readRef}".`,
+    };
+  }
+
+  return {
+    status: "pass",
+    commitSha,
+    output: "",
+  };
+}
+
+export function runRefShaConsistencyGate(repoDir, plugin, primaryFetchSpec) {
+  const sourceRef = typeof plugin?.source?.ref === "string" ? plugin.source.ref.trim() : "";
+  const sourceSha = typeof plugin?.source?.sha === "string" ? plugin.source.sha.trim() : "";
+  if (!sourceRef || !sourceSha) {
+    return {
+      status: "not_run",
+      output: "Ref/SHA consistency gate skipped because one of source.ref or source.sha was not provided.",
+    };
+  }
+
+  const refResult = resolveLocatorReadRef(repoDir, sourceRef, primaryFetchSpec);
+  if (refResult.status === "fail") {
+    return {
+      status: "fail",
+      output: refResult.output,
+    };
+  }
+
+  if (refResult.status === "infra_error") {
+    return {
+      status: "infra_error",
+      output: refResult.output,
+    };
+  }
+
+  const commitResult = resolveCommitShaAtReadRef(repoDir, refResult.readRef, sourceRef);
+  if (commitResult.status !== "pass") {
+    return commitResult;
+  }
+
+  const consistency = evaluateRefShaConsistency({
+    ref: sourceRef,
+    sha: sourceSha,
+    resolvedRefCommitSha: commitResult.commitSha,
+  });
+  if (!consistency.comparable) {
+    return {
+      status: "not_run",
+      output: "Ref/SHA consistency gate skipped because source.sha is not a full 40-character commit SHA.",
+    };
+  }
+
+  if (!consistency.matches) {
+    return {
+      status: "fail",
+      output: `source.ref "${sourceRef}" resolves to "${consistency.normalizedRefCommitSha}", which does not match source.sha "${sourceSha}".`,
+    };
+  }
+
+  return {
+    status: "pass",
+    output: `source.ref "${sourceRef}" resolves to the same commit as source.sha "${sourceSha}".`,
   };
 }
 
@@ -529,6 +748,91 @@ function checkPathExistsAtLocator(repoDir, readRef, locator, repoPath, expectedT
   };
 }
 
+function listTreeEntries(repoDir, readRef, locator, treePath, { recursive = false } = {}) {
+  // Parse the full, untruncated tree listing directly. runCommand()/truncateOutput()
+  // would cap stdout at MAX_OUTPUT_LENGTH and silently drop later entries, and the
+  // default (non-"-z") output quotes unusual names; "-z" gives raw, NUL-delimited records.
+  // "-r -t" recurses in a single process and still lists intermediate tree objects, so a
+  // whole subtree can be inspected without spawning one git process per candidate path.
+  const args = recursive
+    ? ["ls-tree", "-r", "-t", "-z", `${readRef}:${treePath}`]
+    : ["ls-tree", "-z", `${readRef}:${treePath}`];
+  const result = spawnSync("git", args, {
+    cwd: repoDir,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+
+  if (result.status !== 0) {
+    const detail = truncateOutput(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
+    return {
+      entries: [],
+      output: `Unable to list directory "${treePath}" at "${locator}": ${detail}`,
+    };
+  }
+
+  const entries = [];
+  for (const record of String(result.stdout ?? "").split("\0")) {
+    if (!record) {
+      continue;
+    }
+
+    const tabIndex = record.indexOf("\t");
+    if (tabIndex === -1) {
+      continue;
+    }
+
+    const meta = record.slice(0, tabIndex).trim().split(/\s+/);
+    const name = record.slice(tabIndex + 1);
+    if (!name) {
+      continue;
+    }
+
+    entries.push({ type: meta[1] ?? "", name });
+  }
+
+  return { entries, output: "" };
+}
+
+function locateCanvasEntryPoint(repoDir, readRef, locator, extensionsDir) {
+  // Enumerate the extensions subtree with a single recursive git process rather than
+  // spawning a git cat-file per candidate directory, so discovery stays bounded no matter
+  // how many folders an untrusted repository packs under "extensions/". "-r" yields paths
+  // relative to extensionsDir, so nested entry points appear as "<name>/extension.mjs".
+  const listing = listTreeEntries(repoDir, readRef, locator, extensionsDir, { recursive: true });
+  if (listing.output) {
+    return { entryPoint: null, output: listing.output };
+  }
+
+  let flatIsBlob = false;
+  let flatIsTree = false;
+  let nestedEntryPoint = null;
+  for (const entry of listing.entries) {
+    if (entry.name === "extension.mjs") {
+      if (entry.type === "blob") {
+        flatIsBlob = true;
+      } else if (entry.type === "tree") {
+        flatIsTree = true;
+      }
+      continue;
+    }
+
+    const segments = entry.name.split("/");
+    if (segments.length === 2 && segments[1] === "extension.mjs" && entry.type === "blob" && !nestedEntryPoint) {
+      nestedEntryPoint = toPosixPath(extensionsDir, segments[0], "extension.mjs");
+    }
+  }
+
+  if (flatIsBlob) {
+    return { entryPoint: toPosixPath(extensionsDir, "extension.mjs"), output: "" };
+  }
+  if (nestedEntryPoint) {
+    return { entryPoint: nestedEntryPoint, output: "" };
+  }
+
+  return { entryPoint: null, output: "", flatKindMismatch: flatIsTree };
+}
+
 export function runCanvasStructureGate(repoDir, plugin, primaryFetchSpec) {
   if (!hasCanvasKeyword(plugin)) {
     return {
@@ -589,23 +893,25 @@ export function runCanvasStructureGate(repoDir, plugin, primaryFetchSpec) {
       continue;
     }
 
-    const extensionEntryCheck = checkPathExistsAtLocator(repoDir, readRef, locator, extensionEntryPoint, "blob");
+    const extensionEntryCheck = locateCanvasEntryPoint(repoDir, readRef, locator, extensionsDir);
     if (extensionEntryCheck.output) {
       hasInfraError = true;
       messages.push(`- ${locator}: ${extensionEntryCheck.output}`);
       continue;
     }
-    if (!extensionEntryCheck.exists) {
+    if (!extensionEntryCheck.entryPoint) {
       hasFailure = true;
-      if (extensionEntryCheck.kindMismatch) {
+      if (extensionEntryCheck.flatKindMismatch) {
         messages.push(`- ${locator}: "${extensionEntryPoint}" must be a file.`);
       } else {
-        messages.push(`- ${locator}: missing required canvas extension entry point "${extensionEntryPoint}".`);
+        messages.push(
+          `- ${locator}: missing required canvas extension entry point "${extensionEntryPoint}" (or a nested "${extensionsDir}/<extension>/extension.mjs").`,
+        );
       }
       continue;
     }
 
-    messages.push(`- ${locator}: found "${extensionsDir}" with entry point "${extensionEntryPoint}".`);
+    messages.push(`- ${locator}: found "${extensionsDir}" with entry point "${extensionEntryCheck.entryPoint}".`);
   }
 
   if (hasInfraError) {
@@ -657,13 +963,17 @@ export async function runExternalPluginQualityGates(plugin) {
     overall_status: "not_run",
     vally_lint_status: "not_run",
     smoke_status: "not_run",
+    spec_compliance_status: "not_run",
     version_match_status: "not_run",
+    ref_sha_consistency_status: "not_run",
     canvas_structure_status: "not_run",
     failure_class: "none",
     summary: "",
     vally_lint_output: "",
     smoke_output: "",
+    spec_compliance_output: "",
     version_match_output: "",
+    ref_sha_consistency_output: "",
     canvas_structure_output: "",
   };
 
@@ -675,11 +985,14 @@ export async function runExternalPluginQualityGates(plugin) {
     if (!fs.existsSync(pluginRoot) || !fs.statSync(pluginRoot).isDirectory()) {
       result.vally_lint_status = "fail";
       result.smoke_status = "fail";
+      result.spec_compliance_status = "warning";
       result.version_match_status = "fail";
+      result.ref_sha_consistency_status = "not_run";
       result.canvas_structure_status = hasCanvasKeyword(plugin) ? "fail" : "not_run";
       result.overall_status = "fail";
       result.failure_class = "submitter_fixes";
       result.summary = `Plugin path "${plugin.source?.path || "/"}" was not found in the submitted repository snapshot.`;
+      result.spec_compliance_output = result.summary;
       result.version_match_output = result.summary;
       if (hasCanvasKeyword(plugin)) {
         result.canvas_structure_output = result.summary;
@@ -687,9 +1000,17 @@ export async function runExternalPluginQualityGates(plugin) {
       return result;
     }
 
+    const specResult = inspectAgentPluginSpecCompliance(pluginRoot);
+    result.spec_compliance_status = specResult.status;
+    result.spec_compliance_output = specResult.output;
+
     const versionMatchResult = runVersionMatchGate(repoDir, plugin, fetchSpec);
     result.version_match_status = versionMatchResult.status;
     result.version_match_output = versionMatchResult.output;
+
+    const refShaConsistencyResult = runRefShaConsistencyGate(repoDir, plugin, fetchSpec);
+    result.ref_sha_consistency_status = refShaConsistencyResult.status;
+    result.ref_sha_consistency_output = refShaConsistencyResult.output;
 
     const canvasStructureResult = runCanvasStructureGate(repoDir, plugin, fetchSpec);
     result.canvas_structure_status = canvasStructureResult.status;
@@ -707,13 +1028,16 @@ export async function runExternalPluginQualityGates(plugin) {
       result.vally_lint_status,
       result.smoke_status,
       result.version_match_status,
+      result.ref_sha_consistency_status,
       result.canvas_structure_status,
     ]);
     result.failure_class = toFailureClass(result.overall_status);
     result.summary = [
+      `- spec compliance: ${result.spec_compliance_status}`,
       `- vally lint: ${result.vally_lint_status}`,
       `- install smoke test: ${result.smoke_status}`,
       `- version match: ${result.version_match_status}`,
+      `- ref/sha consistency: ${result.ref_sha_consistency_status}`,
       `- canvas structure: ${result.canvas_structure_status}`,
       `- overall: ${result.overall_status}`,
     ].join("\n");
