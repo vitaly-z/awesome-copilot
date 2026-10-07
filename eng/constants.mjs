@@ -21,9 +21,13 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md#adding-instructions) for guidelines on 
 - Download the \`*.instructions.md\` file and manually add it to your project's instruction collection
 
 **To Use/Apply:**
-- Copy these instructions to your \`.github/copilot-instructions.md\` file in your workspace
-- Create task-specific \`*.instructions.md\` files in your workspace's \`.github/instructions/\` folder (e.g., \`.github/instructions/my-csharp-rules.instructions.md\`)
-- Instructions automatically apply to Copilot behavior once installed in your workspace`,
+- For repository-wide guidance, merge the resource's Markdown body into your \`.github/copilot-instructions.md\` file, preserving existing instructions and omitting the YAML frontmatter
+- In VS Code, keep the complete \`*.instructions.md\` file, including its YAML frontmatter, in your workspace's \`.github/instructions/\` folder for path-specific guidance
+- Instructions automatically apply to Copilot behavior once installed in your workspace
+
+**IntelliJ IDEA and other JetBrains IDEs:**
+
+[Set up in IntelliJ](https://docs.github.com/en/copilot/how-tos/configure-custom-instructions-in-your-ide/add-repository-instructions-in-your-ide?tool=jetbrains) using the manual setup guide, not a one-click installer. Use the repository-wide \`.github/copilot-instructions.md\` workflow above. The resource's \`applyTo\` patterns are not enforced in this file, so include only guidance appropriate for the whole repository.`,
 
   pluginsSection: `## 🔌 Plugins
 
@@ -69,14 +73,9 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md#adding-agents) for guidelines on how to
 - Click the **VS Code** or **VS Code Insiders** install button for the agent you want to use
 - Download the \`*.agent.md\` file and add it to your repository
 
-**MCP Server Setup:**
-- Each agent may require one or more MCP servers to function
-- Click the MCP server to view it on the GitHub MCP registry
-- Follow the guide on how to add the MCP server to your repository
-
 **To Activate/Use:**
 - Access installed agents through the VS Code Chat interface, assign them in CCA, or through Copilot CLI (coming soon)
-- Agents will have access to tools from configured MCP servers
+- Some agents require MCP servers; check the agent file for its \`mcp-servers\` configuration
 - Follow agent-specific instructions for optimal usage`,
 
   skillsSection: `## 🎯 Agent Skills

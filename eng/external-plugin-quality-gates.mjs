@@ -25,6 +25,8 @@ const AGENT_PLUGIN_ALLOWED_TOP_LEVEL_FIELDS = new Set([
 ]);
 const AGENT_PLUGIN_NAME_PATTERN = /^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
 const EXTERNAL_CANVAS_KEYWORD = "canvas";
+const COPILOT_CLIENT_NAMESPACE = "com.github.copilot";
+const COPILOT_EXTENSIONS_DIRECTORY = "extensions";
 
 const INFRA_ERROR_PATTERNS = [
   /\b401\b/,
@@ -45,8 +47,12 @@ const INFRA_ERROR_PATTERNS = [
   /etimedout/,
 ];
 
+function normalizeOutput(value) {
+  return String(value ?? "").replace(/\x1b\[[0-9;]*m/g, "").trim();
+}
+
 function truncateOutput(value) {
-  const normalized = String(value ?? "").replace(/\x1b\[[0-9;]*m/g, "").trim();
+  const normalized = normalizeOutput(value);
   if (normalized.length <= MAX_OUTPUT_LENGTH) {
     return normalized;
   }
@@ -364,16 +370,44 @@ async function runVallyLintGate(pluginRoot) {
       }
     }
 
+    const logOutput = normalizeOutput(combinedOutput);
     return {
       status: anyFailure ? "fail" : "pass",
-      output: truncateOutput(combinedOutput),
+      output: truncateOutput(logOutput),
+      logOutput,
     };
   } catch (error) {
+    const logOutput = normalizeOutput(error.stack || error.message);
     return {
       status: "infra_error",
-      output: truncateOutput(error.message),
+      output: truncateOutput(logOutput),
+      logOutput,
     };
   }
+}
+
+export function formatQualityGateLog(plugin, result, { vallyLintOutput } = {}) {
+  const pluginName = String(plugin?.name || "unknown");
+  const sections = [
+    `External plugin quality gate log: ${pluginName}`,
+    "",
+    "Summary",
+    String(result.summary || "No summary provided."),
+  ];
+  const gateOutputs = [
+    ["Spec compliance", result.spec_compliance_output],
+    ["Vally lint", vallyLintOutput ?? result.vally_lint_output],
+    ["Install smoke test", result.smoke_output],
+    ["Version match", result.version_match_output],
+    ["Ref/SHA consistency", result.ref_sha_consistency_output],
+    ["Canvas structure", result.canvas_structure_output],
+  ];
+
+  for (const [heading, output] of gateOutputs) {
+    sections.push("", heading, normalizeOutput(output) || "No output captured.");
+  }
+
+  return `${sections.join("\n")}\n`;
 }
 
 function buildEphemeralMarketplace(workDir, plugin) {
@@ -804,33 +838,24 @@ function locateCanvasEntryPoint(repoDir, readRef, locator, extensionsDir) {
     return { entryPoint: null, output: listing.output };
   }
 
-  let flatIsBlob = false;
-  let flatIsTree = false;
   let nestedEntryPoint = null;
+  let nestedEntryIsNotFile = false;
   for (const entry of listing.entries) {
-    if (entry.name === "extension.mjs") {
-      if (entry.type === "blob") {
-        flatIsBlob = true;
-      } else if (entry.type === "tree") {
-        flatIsTree = true;
-      }
-      continue;
-    }
-
     const segments = entry.name.split("/");
-    if (segments.length === 2 && segments[1] === "extension.mjs" && entry.type === "blob" && !nestedEntryPoint) {
-      nestedEntryPoint = toPosixPath(extensionsDir, segments[0], "extension.mjs");
+    if (segments.length === 2 && segments[1] === "extension.mjs" && !nestedEntryPoint) {
+      if (entry.type === "blob") {
+        nestedEntryPoint = toPosixPath(extensionsDir, segments[0], "extension.mjs");
+      } else {
+        nestedEntryIsNotFile = true;
+      }
     }
   }
 
-  if (flatIsBlob) {
-    return { entryPoint: toPosixPath(extensionsDir, "extension.mjs"), output: "" };
-  }
   if (nestedEntryPoint) {
     return { entryPoint: nestedEntryPoint, output: "" };
   }
 
-  return { entryPoint: null, output: "", flatKindMismatch: flatIsTree };
+  return { entryPoint: null, output: "", kindMismatch: nestedEntryIsNotFile };
 }
 
 export function runCanvasStructureGate(repoDir, plugin, primaryFetchSpec) {
@@ -854,8 +879,8 @@ export function runCanvasStructureGate(repoDir, plugin, primaryFetchSpec) {
     };
   }
 
-  const extensionsDir = toPosixPath(normalizedPluginPath, "extensions");
-  const extensionEntryPoint = toPosixPath(extensionsDir, "extension.mjs");
+  const namespaceDir = toPosixPath(normalizedPluginPath, COPILOT_CLIENT_NAMESPACE);
+  const extensionsDir = toPosixPath(namespaceDir, COPILOT_EXTENSIONS_DIRECTORY);
 
   let hasFailure = false;
   let hasInfraError = false;
@@ -901,11 +926,13 @@ export function runCanvasStructureGate(repoDir, plugin, primaryFetchSpec) {
     }
     if (!extensionEntryCheck.entryPoint) {
       hasFailure = true;
-      if (extensionEntryCheck.flatKindMismatch) {
-        messages.push(`- ${locator}: "${extensionEntryPoint}" must be a file.`);
+      if (extensionEntryCheck.kindMismatch) {
+        messages.push(
+          `- ${locator}: "${extensionsDir}/<extension>/extension.mjs" must be a file.`,
+        );
       } else {
         messages.push(
-          `- ${locator}: missing required canvas extension entry point "${extensionEntryPoint}" (or a nested "${extensionsDir}/<extension>/extension.mjs").`,
+          `- ${locator}: missing required canvas extension entry point "${extensionsDir}/<extension>/extension.mjs".`,
         );
       }
       continue;
@@ -957,8 +984,9 @@ function toFailureClass(overallStatus) {
   return "none";
 }
 
-export async function runExternalPluginQualityGates(plugin) {
+export async function runExternalPluginQualityGates(plugin, { logFile } = {}) {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "external-plugin-quality-"));
+  let vallyLintLogOutput = "";
   const result = {
     overall_status: "not_run",
     vally_lint_status: "not_run",
@@ -1019,6 +1047,7 @@ export async function runExternalPluginQualityGates(plugin) {
     const vallyResult = await runVallyLintGate(pluginRoot);
     result.vally_lint_status = vallyResult.status;
     result.vally_lint_output = vallyResult.output;
+    vallyLintLogOutput = vallyResult.logOutput;
 
     const smokeResult = runInstallSmokeGate(workDir, plugin);
     result.smoke_status = smokeResult.status;
@@ -1048,8 +1077,16 @@ export async function runExternalPluginQualityGates(plugin) {
     result.failure_class = "infra";
     result.summary = truncateOutput(error.message);
     result.vally_lint_output = truncateOutput(error.stack || error.message);
+    vallyLintLogOutput = normalizeOutput(error.stack || error.message);
     return result;
   } finally {
+    if (logFile) {
+      fs.mkdirSync(path.dirname(logFile), { recursive: true });
+      fs.writeFileSync(
+        logFile,
+        formatQualityGateLog(plugin, result, { vallyLintOutput: vallyLintLogOutput }),
+      );
+    }
     fs.rmSync(workDir, { recursive: true, force: true });
   }
 }
@@ -1076,6 +1113,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
 
   const plugin = JSON.parse(args["plugin-json"]);
-  const result = await runExternalPluginQualityGates(plugin);
+  const result = await runExternalPluginQualityGates(plugin, { logFile: args["log-file"] });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
